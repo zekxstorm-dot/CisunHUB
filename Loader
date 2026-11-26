@@ -1,11 +1,14 @@
 --[[
-    EclipseHub | FULL BUILD v2.2 — T1KONE
-    Code Sniper + Auto Submit + Live Console
+    EclipseHub | FULL BUILD v2.5 — T1KONE
+    Auto Part Detector + Billboard Priority + 3 Layer Submit
     Game: Steal a Brainrot
-    FIX v2.2: hardcode remote StockEventService/Redeem
 
-    Hotkey: RightShift = hide / show
-    Unload: About > Unload
+    - Auto detect jumlah parts dari info admin
+    - "has numbers" → 3 parts, "no numbers" → 2 parts
+    - Manual override via stepper UI
+    - 4 layer hook billboard/notifikasi
+    - 3 layer auto submit
+    - Hotkey: RightShift = hide/show
 ]]
 
 ----------------------------------------------------------------
@@ -32,15 +35,15 @@ local CONFIG_FILE = "eclipsehub_config.json"
 local Config = {
     autoCode    = true,
     autoSubmit  = true,
-    submitAfter = 1,
+    submitAfter = 3,
     retype      = true,
-    riddle      = false,
     adminAbuse  = true,
+    autoDetect  = true,
 }
 
 pcall(function()
     if type(isfile)=="function" and type(readfile)=="function" and isfile(CONFIG_FILE) then
-        local ok, data = pcall(HttpService.JSONDecode, HttpService, readfile(CONFIG_FILE))
+        local ok,data=pcall(HttpService.JSONDecode,HttpService,readfile(CONFIG_FILE))
         if ok and type(data)=="table" then
             for k,v in pairs(Config) do
                 if data[k]~=nil and type(data[k])==type(v) then Config[k]=data[k] end
@@ -51,75 +54,75 @@ end)
 
 local function saveConfig()
     if type(writefile)~="function" then return end
-    pcall(function() writefile(CONFIG_FILE, HttpService:JSONEncode(Config)) end)
+    pcall(function() writefile(CONFIG_FILE,HttpService:JSONEncode(Config)) end)
 end
 
 ----------------------------------------------------------------
 -- STATE
 ----------------------------------------------------------------
 local State = {
-    enabled     = Config.autoCode,
-    autoSubmit  = Config.autoSubmit,
-    submitAfter = Config.submitAfter,
-    retype      = Config.retype,
-    riddle      = Config.riddle,
-    adminAbuse  = Config.adminAbuse,
-    seen        = {},
-    captured    = 0,
-    redeemed    = 0,
-    lastLog     = nil,
-    partBuffer  = {},
-    partTarget  = Config.submitAfter,
+    enabled      = Config.autoCode,
+    autoSubmit   = Config.autoSubmit,
+    submitAfter  = Config.submitAfter,
+    retype       = Config.retype,
+    adminAbuse   = Config.adminAbuse,
+    autoDetect   = Config.autoDetect,
+    seen         = {},
+    captured     = 0,
+    redeemed     = 0,
+    parts        = {},
+    partTarget   = Config.submitAfter,
+    collecting   = false,
+    lastPartTime = 0,
+    PART_TIMEOUT = 12,
 }
 
 local Connections = {}
 local Unloaded    = false
+local seenTexts   = {}
 
-local function connect(signal, fn)
-    local c = signal:Connect(fn)
-    Connections[#Connections+1] = c
+local function connect(signal,fn)
+    local c=signal:Connect(fn)
+    Connections[#Connections+1]=c
     return c
 end
 
-local pushLog, statusLog, setStats, unload, submitCode
+local pushLog, setStats, unload, submitCode
+local StepValue  -- forward declare untuk auto-detect update
 
 ----------------------------------------------------------------
 -- THEME
 ----------------------------------------------------------------
 local Theme = {
-    Base       = Color3.fromRGB(8,8,13),
-    Panel      = Color3.fromRGB(12,12,19),
-    Side       = Color3.fromRGB(10,10,16),
-    Card       = Color3.fromRGB(17,17,26),
-    CardHover  = Color3.fromRGB(24,24,36),
-    Stroke     = Color3.fromRGB(34,34,52),
-    Accent     = Color3.fromRGB(139,92,246),
-    AccentSoft = Color3.fromRGB(167,139,250),
-    Gold       = Color3.fromRGB(251,191,36),
-    Text       = Color3.fromRGB(236,236,246),
-    Sub        = Color3.fromRGB(122,122,145),
-    Good       = Color3.fromRGB(74,222,128),
-    Bad        = Color3.fromRGB(248,113,113),
-    Off        = Color3.fromRGB(40,40,56),
+    Base=Color3.fromRGB(8,8,13),
+    Panel=Color3.fromRGB(12,12,19),
+    Side=Color3.fromRGB(10,10,16),
+    Card=Color3.fromRGB(17,17,26),
+    CardHover=Color3.fromRGB(24,24,36),
+    Stroke=Color3.fromRGB(34,34,52),
+    Accent=Color3.fromRGB(139,92,246),
+    AccentSoft=Color3.fromRGB(167,139,250),
+    Gold=Color3.fromRGB(251,191,36),
+    Text=Color3.fromRGB(236,236,246),
+    Sub=Color3.fromRGB(122,122,145),
+    Good=Color3.fromRGB(74,222,128),
+    Bad=Color3.fromRGB(248,113,113),
+    Off=Color3.fromRGB(40,40,56),
 }
 
 ----------------------------------------------------------------
 -- UI HELPERS
 ----------------------------------------------------------------
-local function new(class, props, kids)
-    local obj = Instance.new(class)
+local function new(class,props,kids)
+    local obj=Instance.new(class)
     local parent
-    for k,v in pairs(props or {}) do
-        if k=="Parent" then parent=v else obj[k]=v end
-    end
+    for k,v in pairs(props or {}) do if k=="Parent" then parent=v else obj[k]=v end end
     for _,child in ipairs(kids or {}) do child.Parent=obj end
     if parent then obj.Parent=parent end
     return obj
 end
 local function corner(r) return new("UICorner",{CornerRadius=UDim.new(0,r)}) end
-local function stroke(color,thickness)
-    return new("UIStroke",{Color=color,Thickness=thickness or 1,ApplyStrokeMode=Enum.ApplyStrokeMode.Border})
-end
+local function stroke(c,t) return new("UIStroke",{Color=c,Thickness=t or 1,ApplyStrokeMode=Enum.ApplyStrokeMode.Border}) end
 local function tween(obj,props,time,style,dir)
     local t=TweenService:Create(obj,TweenInfo.new(time or 0.18,style or Enum.EasingStyle.Quint,dir or Enum.EasingDirection.Out),props)
     t:Play() return t
@@ -138,12 +141,12 @@ for _,n in ipairs(OLD) do local p=PlayerGui:FindFirstChild(n) if p then p:Destro
 local Gui=new("ScreenGui",{Name="EclipseHub",ResetOnSpawn=false,IgnoreGuiInset=true,DisplayOrder=999,ZIndexBehavior=Enum.ZIndexBehavior.Sibling})
 if not pcall(function() Gui.Parent=(gethui and gethui()) or game:GetService("CoreGui") end) then Gui.Parent=PlayerGui end
 
-local W,H,HEADER=430,320,44
+local W,H,HEADER=430,370,44
 local Root=new("Frame",{Name="Root",AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.new(0.5,0,0.5,0),Size=UDim2.fromOffset(W,H),BackgroundTransparency=1,Parent=Gui})
 local Scale=new("UIScale",{Scale=0.88,Parent=Root})
 local Shadow=new("ImageLabel",{AnchorPoint=Vector2.new(0.5,0.5),Position=UDim2.new(0.5,0,0.5,8),Size=UDim2.new(1,70,1,70),BackgroundTransparency=1,Image="rbxassetid://6014261993",ImageColor3=Color3.new(0,0,0),ImageTransparency=1,ScaleType=Enum.ScaleType.Slice,SliceCenter=Rect.new(49,49,450,450),ZIndex=0,Parent=Root})
 local Window=new("CanvasGroup",{Name="Window",Size=UDim2.fromScale(1,1),BackgroundColor3=Theme.Base,BorderSizePixel=0,ClipsDescendants=true,GroupTransparency=1,ZIndex=1,Parent=Root},{corner(14)})
-new("Frame",{Name="Bg",Size=UDim2.fromScale(1,1),BackgroundColor3=Color3.new(1,1,1),BorderSizePixel=0,Parent=Window},{new("UIGradient",{Color=ColorSequence.new(Color3.fromRGB(17,14,30),Color3.fromRGB(8,8,13)),Rotation=90})})
+new("Frame",{Size=UDim2.fromScale(1,1),BackgroundColor3=Color3.new(1,1,1),BorderSizePixel=0,Parent=Window},{new("UIGradient",{Color=ColorSequence.new(Color3.fromRGB(17,14,30),Color3.fromRGB(8,8,13)),Rotation=90})})
 local WinStroke=new("UIStroke",{Color=Color3.new(1,1,1),Thickness=1.5,ApplyStrokeMode=Enum.ApplyStrokeMode.Border,Parent=Window})
 local WinGrad=new("UIGradient",{Color=ColorSequence.new({ColorSequenceKeypoint.new(0,Theme.Stroke),ColorSequenceKeypoint.new(0.5,Theme.Accent),ColorSequenceKeypoint.new(1,Theme.Stroke)}),Parent=WinStroke})
 
@@ -157,7 +160,7 @@ local Disc=new("Frame",{Position=UDim2.fromOffset(1,1),Size=UDim2.fromOffset(28,
 new("UIGradient",{Color=ColorSequence.new(Theme.Gold,Theme.Accent),Rotation=45,Parent=Disc})
 local DiscCover=new("Frame",{Position=UDim2.fromOffset(8,2),Size=UDim2.fromOffset(26,26),BackgroundColor3=Theme.Panel,BorderSizePixel=0,ZIndex=2,Parent=Logo},{corner(13)})
 new("TextLabel",{Position=UDim2.fromOffset(54,5),Size=UDim2.fromOffset(200,20),BackgroundTransparency=1,Text="EclipseHub",TextColor3=Theme.Text,TextSize=16,Font=Enum.Font.GothamBold,TextXAlignment=Enum.TextXAlignment.Left,Parent=Header})
-new("TextLabel",{Position=UDim2.fromOffset(54,24),Size=UDim2.fromOffset(200,14),BackgroundTransparency=1,Text="Steal a Brainrot — Code Sniper",TextColor3=Theme.Sub,TextSize=10,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Left,Parent=Header})
+new("TextLabel",{Position=UDim2.fromOffset(54,24),Size=UDim2.fromOffset(200,14),BackgroundTransparency=1,Text="Steal a Brainrot — v2.5",TextColor3=Theme.Sub,TextSize=10,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Left,Parent=Header})
 
 local function headerBtn(text,xOff,hoverColor)
     local b=new("TextButton",{AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,xOff,0.5,0),Size=UDim2.fromOffset(26,26),BackgroundColor3=Theme.Card,Text=text,TextColor3=Theme.Sub,TextSize=14,Font=Enum.Font.GothamBold,AutoButtonColor=false,Parent=Header},{corner(8),stroke(Theme.Stroke,1)})
@@ -182,7 +185,7 @@ local SIDE_W=100
 local Sidebar=new("Frame",{Size=UDim2.new(0,SIDE_W,1,0),BackgroundColor3=Theme.Side,BorderSizePixel=0,Parent=Body})
 new("Frame",{Position=UDim2.new(1,-1,0,0),Size=UDim2.new(0,1,1,0),BackgroundColor3=Theme.Stroke,BorderSizePixel=0,Parent=Sidebar})
 local TabList=new("Frame",{Position=UDim2.fromOffset(10,12),Size=UDim2.new(1,-20,1,-48),BackgroundTransparency=1,Parent=Sidebar},{new("UIListLayout",{Padding=UDim.new(0,6),SortOrder=Enum.SortOrder.LayoutOrder})})
-new("TextLabel",{AnchorPoint=Vector2.new(0,1),Position=UDim2.new(0,14,1,-10),Size=UDim2.new(1,-20,0,14),BackgroundTransparency=1,Text="EclipseHub v2.2",TextColor3=Theme.Sub,TextSize=10,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Left,Parent=Sidebar})
+new("TextLabel",{AnchorPoint=Vector2.new(0,1),Position=UDim2.new(0,14,1,-10),Size=UDim2.new(1,-20,0,14),BackgroundTransparency=1,Text="EclipseHub v2.5",TextColor3=Theme.Sub,TextSize=10,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Left,Parent=Sidebar})
 local Pages=new("Frame",{Position=UDim2.fromOffset(SIDE_W+12,12),Size=UDim2.new(1,-(SIDE_W+24),1,-24),BackgroundTransparency=1,Parent=Body})
 local TabButtons,PageFrames,currentTab={},{},nil
 
@@ -207,7 +210,6 @@ local function addTab(name,order)
     btn.MouseLeave:Connect(function() if currentTab~=name then tween(label,{TextColor3=Theme.Sub}) end end)
     btn.MouseButton1Click:Connect(function() selectTab(name) end)
 end
-
 addTab("Redeemer",1) addTab("Console",2) addTab("About",3)
 
 ----------------------------------------------------------------
@@ -216,6 +218,7 @@ addTab("Redeemer",1) addTab("Console",2) addTab("About",3)
 local MainPage=new("ScrollingFrame",{Size=UDim2.fromScale(1,1),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=Theme.Accent,CanvasSize=UDim2.new(),AutomaticCanvasSize=Enum.AutomaticSize.Y,Visible=false,Parent=Pages},{new("UIListLayout",{Padding=UDim.new(0,8),SortOrder=Enum.SortOrder.LayoutOrder}),new("UIPadding",{PaddingRight=UDim.new(0,6)})})
 PageFrames["Redeemer"]=MainPage
 
+-- Stats
 local StatsRow=new("Frame",{Size=UDim2.new(1,0,0,46),BackgroundTransparency=1,LayoutOrder=1,Parent=MainPage})
 local function statCard(xScale,xOff,label,valueColor)
     local c=new("Frame",{Position=UDim2.new(xScale,xOff,0,0),Size=UDim2.new(0.5,-4,1,0),BackgroundColor3=Theme.Card,BorderSizePixel=0,Parent=StatsRow},{corner(10),stroke(Theme.Stroke,1)})
@@ -226,7 +229,13 @@ local CapturedValue=statCard(0,0,"CODES CAPTURED",Theme.AccentSoft)
 local RedeemedValue=statCard(0.5,4,"CODES REDEEMED",Theme.Good)
 setStats=function() CapturedValue.Text=tostring(State.captured) RedeemedValue.Text=tostring(State.redeemed) end
 
-local ToggleCard=new("Frame",{Size=UDim2.new(1,0,0,188),BackgroundColor3=Theme.Card,BorderSizePixel=0,LayoutOrder=2,Parent=MainPage},{corner(10),stroke(Theme.Stroke,1),new("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder}),new("UIPadding",{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4)})})
+-- Part status card
+local PartCard=new("Frame",{Size=UDim2.new(1,0,0,52),BackgroundColor3=Theme.Card,BorderSizePixel=0,LayoutOrder=2,Parent=MainPage},{corner(10),stroke(Theme.Stroke,1)})
+new("TextLabel",{Position=UDim2.fromOffset(14,6),Size=UDim2.new(1,-28,0,16),BackgroundTransparency=1,Text="PART COLLECTOR",TextColor3=Theme.Sub,TextSize=9,Font=Enum.Font.GothamBold,TextXAlignment=Enum.TextXAlignment.Left,Parent=PartCard})
+local PartStatus=new("TextLabel",{Position=UDim2.fromOffset(14,20),Size=UDim2.new(1,-28,0,24),BackgroundTransparency=1,Text="Waiting...",TextColor3=Theme.Text,TextSize=12,Font=Enum.Font.GothamBold,TextXAlignment=Enum.TextXAlignment.Left,TextWrapped=true,Parent=PartCard})
+
+-- Toggles
+local ToggleCard=new("Frame",{Size=UDim2.new(1,0,0,188),BackgroundColor3=Theme.Card,BorderSizePixel=0,LayoutOrder=3,Parent=MainPage},{corner(10),stroke(Theme.Stroke,1),new("UIListLayout",{SortOrder=Enum.SortOrder.LayoutOrder}),new("UIPadding",{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4),PaddingLeft=UDim.new(0,4),PaddingRight=UDim.new(0,4)})})
 
 local function toggleRow(order,label,desc,default,callback)
     local state=default
@@ -245,15 +254,17 @@ local function toggleRow(order,label,desc,default,callback)
     end)
 end
 
-toggleRow(1,"Auto Code","Capture codes dari chat + billboard",State.enabled,function(v) State.enabled=v Config.autoCode=v saveConfig() setPill(v) pushLog(v and "Auto Code ON" or "Auto Code OFF",v and Theme.Good or Theme.Bad) end)
-toggleRow(2,"Auto Submit","Redeem otomatis setelah capture",State.autoSubmit,function(v) State.autoSubmit=v Config.autoSubmit=v saveConfig() end)
-toggleRow(3,"Admin Abuse","Fire admin remotes untuk currency",State.adminAbuse,function(v) State.adminAbuse=v Config.adminAbuse=v saveConfig() pushLog(v and "Admin Abuse ON" or "Admin Abuse OFF",v and Theme.Good or Theme.Bad) end)
-toggleRow(4,"Retype Invalid","Re-paste kalau code ditolak",State.retype,function(v) State.retype=v Config.retype=v saveConfig() end)
-toggleRow(5,"Riddle Solver","Experimental riddle auto-answer",State.riddle,function(v) State.riddle=v Config.riddle=v saveConfig() end)
+toggleRow(1,"Auto Code","Capture + collect parts otomatis",State.enabled,function(v) State.enabled=v Config.autoCode=v saveConfig() setPill(v) pushLog(v and "Auto Code ON" or "Auto Code OFF",v and Theme.Good or Theme.Bad) end)
+toggleRow(2,"Auto Submit","Submit otomatis setelah parts lengkap",State.autoSubmit,function(v) State.autoSubmit=v Config.autoSubmit=v saveConfig() end)
+toggleRow(3,"Auto Detect Parts","Detect jumlah parts dari info admin",State.autoDetect,function(v) State.autoDetect=v Config.autoDetect=v saveConfig() pushLog(v and "Auto Detect ON" or "Auto Detect OFF — pakai manual stepper",v and Theme.Good or Theme.Gold) end)
+toggleRow(4,"Retype Invalid","Re-submit kalau code ditolak",State.retype,function(v) State.retype=v Config.retype=v saveConfig() end)
+toggleRow(5,"Admin Abuse","Fire currency remotes",State.adminAbuse,function(v) State.adminAbuse=v Config.adminAbuse=v saveConfig() pushLog(v and "Admin Abuse ON" or "Admin Abuse OFF",v and Theme.Good or Theme.Bad) end)
 
-local StepCard=new("Frame",{Size=UDim2.new(1,0,0,42),BackgroundColor3=Theme.Card,BorderSizePixel=0,LayoutOrder=3,Parent=MainPage},{corner(10),stroke(Theme.Stroke,1)})
-new("TextLabel",{Position=UDim2.fromOffset(14,6),Size=UDim2.new(1,-130,0,16),BackgroundTransparency=1,Text="Submit after",TextColor3=Theme.Text,TextSize=12,Font=Enum.Font.GothamMedium,TextXAlignment=Enum.TextXAlignment.Left,Parent=StepCard})
-new("TextLabel",{Position=UDim2.fromOffset(14,22),Size=UDim2.new(1,-130,0,13),BackgroundTransparency=1,Text="Parts collected before redeeming",TextColor3=Theme.Sub,TextSize=10,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Left,Parent=StepCard})
+-- Stepper — manual override
+local StepCard=new("Frame",{Size=UDim2.new(1,0,0,56),BackgroundColor3=Theme.Card,BorderSizePixel=0,LayoutOrder=4,Parent=MainPage},{corner(10),stroke(Theme.Stroke,1)})
+new("TextLabel",{Position=UDim2.fromOffset(14,6),Size=UDim2.new(1,-130,0,16),BackgroundTransparency=1,Text="Manual Parts Override",TextColor3=Theme.Text,TextSize=12,Font=Enum.Font.GothamMedium,TextXAlignment=Enum.TextXAlignment.Left,Parent=StepCard})
+new("TextLabel",{Position=UDim2.fromOffset(14,22),Size=UDim2.new(1,-130,0,28),BackgroundTransparency=1,Text="Aktif kalau Auto Detect OFF\natau override manual",TextColor3=Theme.Sub,TextSize=10,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Left,TextWrapped=true,Parent=StepCard})
+
 local Stepper=new("Frame",{AnchorPoint=Vector2.new(1,0.5),Position=UDim2.new(1,-12,0.5,0),Size=UDim2.fromOffset(88,26),BackgroundTransparency=1,Parent=StepCard})
 local function stepBtn(text,x)
     local b=new("TextButton",{Position=UDim2.fromOffset(x,0),Size=UDim2.fromOffset(26,26),BackgroundColor3=Theme.CardHover,Text=text,TextColor3=Theme.Text,TextSize=14,Font=Enum.Font.GothamBold,AutoButtonColor=false,Parent=Stepper},{corner(8),stroke(Theme.Stroke,1)})
@@ -262,11 +273,17 @@ local function stepBtn(text,x)
     return b
 end
 local StepMinus=stepBtn("-",0)
-local StepValue=new("TextLabel",{Position=UDim2.fromOffset(28,0),Size=UDim2.fromOffset(32,26),BackgroundTransparency=1,Text=tostring(State.submitAfter),TextColor3=Theme.Text,TextSize=13,Font=Enum.Font.GothamBold,TextXAlignment=Enum.TextXAlignment.Center,Parent=Stepper})
+StepValue=new("TextLabel",{Position=UDim2.fromOffset(28,0),Size=UDim2.fromOffset(32,26),BackgroundTransparency=1,Text=tostring(State.submitAfter),TextColor3=Theme.Text,TextSize=13,Font=Enum.Font.GothamBold,TextXAlignment=Enum.TextXAlignment.Center,Parent=Stepper})
 local StepPlus=stepBtn("+",62)
-local function updateStep() StepValue.Text=tostring(State.submitAfter) State.partTarget=State.submitAfter Config.submitAfter=State.submitAfter saveConfig() end
-StepMinus.MouseButton1Click:Connect(function() State.submitAfter=math.max(1,State.submitAfter-1) updateStep() end)
-StepPlus.MouseButton1Click:Connect(function() State.submitAfter=State.submitAfter+1 updateStep() end)
+local function updateStep(n)
+    State.submitAfter=n or State.submitAfter
+    State.partTarget=State.submitAfter
+    StepValue.Text=tostring(State.submitAfter)
+    Config.submitAfter=State.submitAfter
+    saveConfig()
+end
+StepMinus.MouseButton1Click:Connect(function() updateStep(math.max(1,State.submitAfter-1)) end)
+StepPlus.MouseButton1Click:Connect(function() updateStep(State.submitAfter+1) end)
 
 ----------------------------------------------------------------
 -- PAGE 2: CONSOLE
@@ -287,7 +304,6 @@ pushLog=function(msg,color)
     task.delay(0.03,function() if LogScroll and LogScroll.Parent then LogScroll.CanvasPosition=Vector2.new(0,1e6) end end)
 end
 ClearBtn.MouseButton1Click:Connect(function() for _,l in ipairs(logLines) do l:Destroy() end logLines={} end)
-statusLog=function(msg,color) if msg==State.lastLog then return end State.lastLog=msg pushLog(msg,color) end
 
 ----------------------------------------------------------------
 -- PAGE 3: ABOUT
@@ -296,8 +312,8 @@ local AboutPage=new("Frame",{Size=UDim2.fromScale(1,1),BackgroundTransparency=1,
 PageFrames["About"]=AboutPage
 local AboutCard=new("Frame",{Size=UDim2.new(1,0,1,-46),BackgroundColor3=Theme.Card,BorderSizePixel=0,Parent=AboutPage},{corner(10),stroke(Theme.Stroke,1)})
 new("TextLabel",{Position=UDim2.fromOffset(14,10),Size=UDim2.new(1,-28,0,24),BackgroundTransparency=1,Text="EclipseHub",TextColor3=Theme.Text,TextSize=20,Font=Enum.Font.GothamBold,TextXAlignment=Enum.TextXAlignment.Left,Parent=AboutCard})
-new("TextLabel",{Position=UDim2.fromOffset(14,34),Size=UDim2.new(1,-28,0,14),BackgroundTransparency=1,Text="Full Build  |  v2.2  |  T1KONE",TextColor3=Theme.AccentSoft,TextSize=11,Font=Enum.Font.GothamMedium,TextXAlignment=Enum.TextXAlignment.Left,Parent=AboutCard})
-new("TextLabel",{Position=UDim2.fromOffset(14,58),Size=UDim2.new(1,-28,1,-68),BackgroundTransparency=1,Text="v2.2: Remote hardcoded\nStockEventService/Redeem\nAuto Submit via RemoteEvent\nCode Sniper aktif\n\nHOTKEY: RightShift hide/show",TextColor3=Theme.Sub,TextSize=10,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,TextWrapped=true,Parent=AboutCard})
+new("TextLabel",{Position=UDim2.fromOffset(14,34),Size=UDim2.new(1,-28,0,14),BackgroundTransparency=1,Text="Full Build  |  v2.5  |  T1KONE",TextColor3=Theme.AccentSoft,TextSize=11,Font=Enum.Font.GothamMedium,TextXAlignment=Enum.TextXAlignment.Left,Parent=AboutCard})
+new("TextLabel",{Position=UDim2.fromOffset(14,58),Size=UDim2.new(1,-28,1,-68),BackgroundTransparency=1,Text="v2.5: Auto Part Detector\n'has numbers' → 3 parts\n'no numbers' → 2 parts\nManual override via stepper\n4 Layer Hook + 3 Layer Submit\n\nHOTKEY: RightShift hide/show",TextColor3=Theme.Sub,TextSize=10,Font=Enum.Font.Gotham,TextXAlignment=Enum.TextXAlignment.Left,TextYAlignment=Enum.TextYAlignment.Top,TextWrapped=true,Parent=AboutCard})
 local UnloadBtn=new("TextButton",{AnchorPoint=Vector2.new(0,1),Position=UDim2.new(0,0,1,0),Size=UDim2.new(1,0,0,36),BackgroundColor3=Theme.Card,Text="Unload EclipseHub",TextColor3=Theme.Bad,TextSize=12,Font=Enum.Font.GothamBold,AutoButtonColor=false,Parent=AboutPage},{corner(10),stroke(Theme.Stroke,1)})
 UnloadBtn.MouseEnter:Connect(function() tween(UnloadBtn,{BackgroundColor3=Theme.Bad,TextColor3=Color3.new(1,1,1)}) end)
 UnloadBtn.MouseLeave:Connect(function() tween(UnloadBtn,{BackgroundColor3=Theme.Card,TextColor3=Theme.Bad}) end)
@@ -338,7 +354,7 @@ do
         local t=os.clock()-t0
         WinGrad.Rotation=(t*40)%360
         DiscCover.Position=UDim2.fromOffset(8+math.sin(t*1.2)*2,2)
-        if State.enabled then PillDot.BackgroundTransparency=0.3+0.3*math.sin(t*3) else PillDot.BackgroundTransparency=0 end
+        PillDot.BackgroundTransparency=State.enabled and 0.3+0.3*math.sin(t*3) or 0
     end)
 end
 tween(Scale,{Scale=1},0.5,Enum.EasingStyle.Back)
@@ -346,338 +362,440 @@ tween(Window,{GroupTransparency=0},0.35)
 tween(Shadow,{ImageTransparency=0.45},0.5)
 
 ----------------------------------------------------------------
--- CORE: FIND REDEEM REMOTE (HARDCODED v2.2)
+-- CORE: GET REDEEM REMOTE
 ----------------------------------------------------------------
 local function getRedeemRemote()
-    -- Primary: StockEventService/Redeem (confirmed dari scan)
-    local net = ReplicatedStorage:FindFirstChild("Packages")
-        and ReplicatedStorage.Packages:FindFirstChild("Net")
+    local net=ReplicatedStorage:FindFirstChild("Packages")
+    if net then net=net:FindFirstChild("Net") end
     if net then
-        local re = net:FindFirstChild("RE")
+        local re=net:FindFirstChild("RE")
         if re then
-            local stock = re:FindFirstChild("StockEventService")
+            local stock=re:FindFirstChild("StockEventService")
             if stock then
-                local redeem = stock:FindFirstChild("Redeem")
+                local redeem=stock:FindFirstChild("Redeem")
                 if redeem then return redeem end
             end
         end
     end
-    -- Fallback: deep search keyword
-    local function deepFind(parent, depth)
-        if depth > 6 then return nil end
-        for _, obj in ipairs(parent:GetChildren()) do
-            if (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")) then
-                local n = obj.Name:lower()
-                if n:find("redeem") or n:find("code") or n:find("promo") then
-                    return obj
-                end
+    local function deepFind(parent,depth)
+        if depth>6 then return nil end
+        for _,obj in ipairs(parent:GetChildren()) do
+            if obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction") then
+                local n=obj.Name:lower()
+                if n:find("redeem") or n:find("code") or n:find("promo") then return obj end
             end
-            local found = deepFind(obj, depth+1)
+            local found=deepFind(obj,depth+1)
             if found then return found end
         end
-        return nil
     end
-    return deepFind(ReplicatedStorage, 0)
+    return deepFind(ReplicatedStorage,0)
 end
 
 ----------------------------------------------------------------
--- CORE: CODE EXTRACTION
+-- CORE: 3 LAYER SUBMIT
 ----------------------------------------------------------------
-local CODE_PATTERNS = {
-    "code%s+is%s*[:%s]*([A-Z][A-Z0-9_%-]{3,24})",
-    "use%s+code[:%s]+([A-Z][A-Z0-9_%-]{3,24})",
-    "redeem[:%s]+([A-Z][A-Z0-9_%-]{3,24})",
-    "new%s+code[:%s]*([A-Z][A-Z0-9_%-]{3,24})",
-    "sammy[:%s]+([A-Z][A-Z0-9_%-]{3,24})",
-    "🎩%s*([A-Z][A-Z0-9_%-]{3,24})",
-}
+submitCode=function(code)
+    if not code or code=="" then return end
+    if State.seen[code] then pushLog("Already redeemed: "..code,Theme.Sub) return end
 
-local BLACKLIST = {
-    "BRAINROT","STEAL","PLAYER","LOCAL","FRAME","LABEL",
-    "BUTTON","IMAGE","SCRIPT","MODEL","PART","UNION",
-    "TOOL","MESH","DECAL","SOUND","WELD","BODY","HINT",
-    "BILLBOARD","SURFACE","SCREEN","FOLDER","VALUE",
-    "HUMANOID","ANIMATE","IDLE","WALK","RUN","JUMP",
-    "TUNAI","MULTI","AREA","CASH","COIN","GEM","ITEM",
-    "CHAT","TEXT","GAME","WORK","SPACE","CORE","GUI",
-    "CLAIM","EVENT","SERVICE","REMOTE","PACKAGE",
-}
+    pushLog(">>> SUBMITTING: "..code,Theme.Gold)
 
-local function isBlacklisted(code)
-    for _,word in ipairs(BLACKLIST) do
-        if code==word or code:find(word) then return true end
+    -- LAYER 1: RemoteEvent
+    task.spawn(function()
+        local remote=getRedeemRemote()
+        if remote then
+            local payloads={{code},{LocalPlayer,code},{code,LocalPlayer},{LocalPlayer.Name,code},{code,LocalPlayer.Name},{LocalPlayer.UserId,code},{code,LocalPlayer.UserId}}
+            for _,payload in ipairs(payloads) do
+                pcall(function()
+                    if remote:IsA("RemoteEvent") then remote:FireServer(table.unpack(payload))
+                    else remote:InvokeServer(table.unpack(payload)) end
+                end)
+                task.wait(0.05)
+            end
+            pushLog("L1 Remote fired",Theme.AccentSoft)
+        else
+            pushLog("L1 Remote not found",Theme.Bad)
+        end
+    end)
+
+    -- LAYER 2: Keyboard simulation
+    task.spawn(function()
+        task.wait(0.3)
+        local function findUI()
+            local box,btn=nil,nil
+            for _,obj in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
+                if obj:IsA("TextBox") and not box then
+                    local ph=(obj.PlaceholderText or ""):lower()
+                    if ph:find("code") then box=obj end
+                end
+                if (obj:IsA("TextButton") or obj:IsA("GuiButton")) and not btn then
+                    local tx=(obj.Text or ""):lower()
+                    if tx:find("submit") or tx:find("redeem") then btn=obj end
+                end
+                if box and btn then break end
+            end
+            return box,btn
+        end
+        local box,btn=findUI()
+        if not box then
+            for _,obj in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
+                if obj:IsA("TextButton") or obj:IsA("ImageButton") then
+                    local tx=(obj.Text or ""):lower()
+                    local nm=obj.Name:lower()
+                    if tx:find("kode") or tx:find("code") or nm:find("kode") or nm:find("code") or nm:find("123") then
+                        pcall(function() obj.MouseButton1Click:Fire() obj.MouseButton1Down:Fire() task.wait(0.03) obj.MouseButton1Up:Fire() end)
+                        task.wait(0.6)
+                        break
+                    end
+                end
+            end
+            box,btn=findUI()
+        end
+        if box then
+            pcall(function() box:CaptureFocus() box.Text="" task.wait(0.05) end)
+            for i=1,#code do
+                pcall(function() box.Text=code:sub(1,i) end)
+                task.wait(0.03)
+            end
+            pcall(function() box.FocusLost:Fire(true) end)
+            task.wait(0.1)
+            pushLog("L2 Keyboard sim done",Theme.AccentSoft)
+            if btn then
+                pcall(function() btn.MouseButton1Down:Fire() task.wait(0.05) btn.MouseButton1Up:Fire() btn.MouseButton1Click:Fire() end)
+                pushLog("L2 Submit clicked",Theme.Good)
+            end
+        else
+            pushLog("L2 TextBox not found",Theme.Bad)
+        end
+    end)
+
+    -- LAYER 3: Direct inject backup
+    task.spawn(function()
+        task.wait(0.9)
+        local box,btn=nil,nil
+        for _,obj in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
+            if obj:IsA("TextBox") and not box then
+                if (obj.PlaceholderText or ""):lower():find("code") then box=obj end
+            end
+            if (obj:IsA("TextButton") or obj:IsA("GuiButton")) and not btn then
+                local tx=(obj.Text or ""):lower()
+                if tx:find("submit") or tx:find("redeem") then btn=obj end
+            end
+            if box and btn then break end
+        end
+        if box then
+            pcall(function() box:CaptureFocus() box.Text=code box.FocusLost:Fire(true) end)
+            task.wait(0.08)
+            if btn then
+                pcall(function() btn.MouseButton1Down:Fire() task.wait(0.03) btn.MouseButton1Up:Fire() btn.MouseButton1Click:Fire() end)
+                pushLog("L3 Direct inject done",Theme.Good)
+            end
+        end
+    end)
+
+    State.seen[code]=true
+    State.redeemed=State.redeemed+1
+    setStats()
+    pushLog("REDEEMED: "..code,Theme.Good)
+
+    if State.retype then
+        task.delay(2.5,function()
+            for _,obj in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
+                if obj:IsA("TextLabel") then
+                    local tx=obj.Text:lower()
+                    if tx:find("invalid") or tx:find("already") or tx:find("expired") or tx:find("salah") or tx:find("gagal") then
+                        pushLog("Retype: "..code,Theme.Gold)
+                        State.seen[code]=nil
+                        task.wait(0.5)
+                        submitCode(code)
+                        return
+                    end
+                end
+            end
+        end)
     end
+end
+
+----------------------------------------------------------------
+-- CORE: AUTO PART DETECTOR
+----------------------------------------------------------------
+local function detectPartCount(text)
+    local lo=text:lower()
+
+    -- Angka eksplisit: "3 parts", "2 bagian", "3 kata"
+    local num=lo:match("(%d+)%s*parts?")
+        or lo:match("(%d+)%s*bagian")
+        or lo:match("(%d+)%s*kata")
+        or lo:match("(%d+)%s*words?")
+        or lo:match("(%d+)%s*pieces?")
+        or lo:match("(%d+)%s*section")
+        or lo:match("(%d+)%s*bagian")
+    if num then return tonumber(num) end
+
+    -- Kata angka
+    local wordNums={one=1,two=2,three=3,four=4,five=5,satu=1,dua=2,tiga=3,empat=4,lima=5}
+    for word,count in pairs(wordNums) do
+        if lo:find(word.."%s*parts?") or lo:find(word.."%s*bagian") or lo:find(word.."%s*kata") then
+            return count
+        end
+    end
+
+    -- Keyword tanpa angka
+    if lo:find("no number") or lo:find("without number")
+    or lo:find("tanpa angka") or lo:find("tanpa nomor")
+    or lo:find("no digit") or lo:find("without digit") then
+        return 2
+    end
+
+    if lo:find("has number") or lo:find("with number")
+    or lo:find("ada angka") or lo:find("ada nomor")
+    or lo:find("has digit") or lo:find("with digit") then
+        return 3
+    end
+
+    return nil
+end
+
+----------------------------------------------------------------
+-- CORE: SIGNAL DETECTION
+----------------------------------------------------------------
+local SIGNAL_WORDS={"use","code","this","has","numbers","redeem","here","from","sammy","dlc","any","or","the","and","a","an","is","are","kode","gunakan","pakai","masukkan","angka","nomor","ini","dengan","ada","akan","without","no","tanpa"}
+
+local function isSignalWord(w)
+    local lo=w:lower()
+    for _,sw in ipairs(SIGNAL_WORDS) do if lo==sw then return true end end
     return false
 end
 
-local function extractCode(text)
-    if not text or text=="" then return nil end
-    local upper = text:upper()
-    local hasKw = upper:find("CODE") or upper:find("REDEEM") or upper:find("SAMMY") or upper:find("🎩")
-    if not hasKw then return nil end
-    for _,pat in ipairs(CODE_PATTERNS) do
-        local m = upper:match(pat)
-        if m then
-            m = m:gsub("%s+","")
-            if #m>=4 and #m<=25 and not isBlacklisted(m) then return m end
-        end
+local function isCodeSignal(text)
+    local lo=text:lower()
+    return lo:find("use code") or lo:find("code is") or lo:find("this code")
+        or lo:find("kode") or lo:find("redeem") or lo:find("gunakan")
+        or lo:find("has number") or lo:find("ada angka")
+        or lo:find("no number") or lo:find("tanpa angka")
+        or lo:find("without number") or lo:find("parts")
+        or lo:find("bagian") or lo:find("use this")
+        or lo:find("sammy")
+end
+
+local function extractPart(text)
+    if not text or #text<1 or #text>30 then return nil end
+    local clean=text:match("^%s*(.-)%s*$")
+    if clean=="" then return nil end
+    if clean:match("^[%w%-_]+$") and #clean>=1 and #clean<=20 then
+        if not isSignalWord(clean) then return clean:upper() end
     end
     return nil
 end
 
 ----------------------------------------------------------------
--- CORE: SUBMIT CODE (v2.2 — RemoteEvent first)
+-- CORE: PART COLLECTOR
 ----------------------------------------------------------------
-submitCode = function(code)
-    if not code or code=="" then return end
-    if State.seen[code] then return end
-
-    pushLog("Submitting: "..code, Theme.Gold)
-
-    -- METHOD 1: Fire RemoteEvent langsung (paling reliable)
-    local remote = getRedeemRemote()
-    if remote then
-        local success = false
-
-        if remote:IsA("RemoteEvent") then
-            -- Coba berbagai payload format
-            local payloads = {
-                {code},
-                {LocalPlayer, code},
-                {code, LocalPlayer},
-                {LocalPlayer.Name, code},
-                {code, LocalPlayer.Name},
-            }
-            for _,payload in ipairs(payloads) do
-                pcall(function() remote:FireServer(table.unpack(payload)) end)
-                task.wait(0.05)
-            end
-            success = true
-            pushLog("Remote fired: "..remote:GetFullName(), Theme.AccentSoft)
-
-        elseif remote:IsA("RemoteFunction") then
-            local results = {}
-            local tries = {
-                function() return remote:InvokeServer(code) end,
-                function() return remote:InvokeServer(LocalPlayer, code) end,
-                function() return remote:InvokeServer(code, LocalPlayer.Name) end,
-            }
-            for _,fn in ipairs(tries) do
-                pcall(function() table.insert(results, fn()) end)
-                task.wait(0.05)
-            end
-            success = true
-            pushLog("RemoteFunction invoked", Theme.AccentSoft)
-        end
-
-        if success then
-            State.seen[code] = true
-            State.redeemed   = State.redeemed + 1
-            setStats()
-            pushLog("REDEEMED: "..code, Theme.Good)
-            return
-        end
-    end
-
-    -- METHOD 2: Fallback UI injection
-    local function findCodeUI()
-        local box, btn = nil, nil
-        for _,obj in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
-            if obj:IsA("TextBox") and not box then
-                if obj.PlaceholderText:lower():find("code") then box=obj end
-            end
-            if (obj:IsA("TextButton") or obj:IsA("GuiButton")) and not btn then
-                local tx=obj.Text:lower()
-                if tx:find("submit") or tx:find("redeem") or tx:find("confirm") then btn=obj end
-            end
-            if box and btn then break end
-        end
-        return box, btn
-    end
-
-    local box, btn = findCodeUI()
-    if not box then
-        -- Auto-open panel Kode
-        for _,obj in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
-            if obj:IsA("TextButton") or obj:IsA("ImageButton") then
-                local tx=(obj.Text or ""):lower()
-                local nm=obj.Name:lower()
-                if tx:find("kode") or tx:find("code") or nm:find("kode") or nm:find("code") or nm:find("123") then
-                    pcall(function() obj.MouseButton1Click:Fire() end)
-                    task.wait(0.4)
-                    break
-                end
-            end
-        end
-        box, btn = findCodeUI()
-    end
-
-    if box then
-        pcall(function()
-            box:CaptureFocus()
-            box.Text = code
-            box.FocusLost:Fire(true)
-        end)
-        task.wait(0.08)
-        if btn then
-            pcall(function() btn.MouseButton1Click:Fire() end)
-            pcall(function() btn.MouseButton1Down:Fire() task.wait(0.02) btn.MouseButton1Up:Fire() end)
-        end
-        State.seen[code] = true
-        State.redeemed   = State.redeemed + 1
-        setStats()
-        pushLog("REDEEMED via UI: "..code, Theme.Good)
-    else
-        pushLog("FAILED — buka panel Kode dulu", Theme.Bad)
-    end
+local function resetParts()
+    State.parts={}
+    State.collecting=false
+    PartStatus.Text="Waiting..."
+    PartStatus.TextColor3=Theme.Sub
 end
 
-----------------------------------------------------------------
--- CORE: PROCESS TEXT
-----------------------------------------------------------------
-local function processText(text)
+local function addPart(part)
     if not State.enabled then return end
-    if not text or #text<7 or #text>120 then return end
-    local code = extractCode(text)
-    if not code or State.seen[code] then return end
-    State.captured = State.captured+1
-    setStats()
-    pushLog("CAPTURED: "..code, Theme.AccentSoft)
-    table.insert(State.partBuffer, code)
-    if #State.partBuffer >= State.partTarget then
-        local finalCode = State.partBuffer[#State.partBuffer]
-        State.partBuffer = {}
-        if State.autoSubmit then
-            task.spawn(function() submitCode(finalCode) end)
+    for _,p in ipairs(State.parts) do if p==part then return end end
+    if not State.collecting then State.collecting=true State.parts={} end
+
+    table.insert(State.parts,part)
+    State.lastPartTime=os.clock()
+
+    local partStr=table.concat(State.parts," + ")
+    PartStatus.Text=#State.parts.."/"..State.partTarget.." → "..partStr
+    PartStatus.TextColor3=Theme.Gold
+    pushLog("Part "..#State.parts.."/"..State.partTarget..": "..part,Theme.AccentSoft)
+
+    if #State.parts>=State.partTarget then
+        local fullCode=table.concat(State.parts,"")
+        pushLog("Code lengkap: "..fullCode,Theme.Good)
+        PartStatus.Text="SUBMIT → "..fullCode
+        PartStatus.TextColor3=Theme.Good
+        State.captured=State.captured+1
+        setStats()
+        if State.autoSubmit then task.spawn(function() task.wait(0.1) submitCode(fullCode) end) end
+        task.delay(3,resetParts)
+        return
+    end
+
+    local token=State.lastPartTime
+    task.spawn(function()
+        task.wait(State.PART_TIMEOUT)
+        if State.lastPartTime==token and State.collecting then
+            pushLog("Timeout — reset parts",Theme.Bad)
+            resetParts()
         end
+    end)
+end
+
+----------------------------------------------------------------
+-- CORE: PROCESS RAW TEXT
+----------------------------------------------------------------
+local function processRawText(text,source)
+    if not State.enabled then return end
+    if not text or #text<1 or #text>80 then return end
+    local clean=text:match("^%s*(.-)%s*$")
+    if clean=="" then return end
+
+    local key=source..":"..clean:upper()
+    if seenTexts[key] then return end
+    seenTexts[key]=true
+    task.delay(20,function() seenTexts[key]=nil end)
+
+    -- Auto detect part count dari info admin
+    if State.autoDetect then
+        local detected=detectPartCount(clean)
+        if detected then
+            State.partTarget=detected
+            updateStep(detected)
+            pushLog("Auto-detect: "..detected.." parts",Theme.Gold)
+            PartStatus.Text="Expecting "..detected.." parts..."
+            PartStatus.TextColor3=Theme.Gold
+        end
+    end
+
+    -- Signal detection
+    if isCodeSignal(clean) then
+        if not State.collecting then
+            State.collecting=true
+            State.parts={}
+            pushLog("Signal dari "..source,Theme.Gold)
+            PartStatus.Text="Signal! Waiting "..State.partTarget.." parts..."
+            PartStatus.TextColor3=Theme.Gold
+        end
+        -- Direct code dalam signal
+        local directCode=clean:upper():match("USE%s+CODE[%s:]+([%w%-_]+)")
+            or clean:upper():match("CODE%s+IS[%s:]+([%w%-_]+)")
+            or clean:upper():match("REDEEM[%s:]+([%w%-_]+)")
+        if directCode and #directCode>=3 and not State.seen[directCode] then
+            pushLog("Direct code: "..directCode,Theme.AccentSoft)
+            State.captured=State.captured+1
+            setStats()
+            if State.autoSubmit then task.spawn(function() submitCode(directCode) end) end
+        end
+        return
+    end
+
+    -- Collecting mode
+    if State.collecting then
+        local part=extractPart(clean)
+        if part then addPart(part) end
     end
 end
 
 ----------------------------------------------------------------
--- CORE: CHAT HOOKS
+-- HOOKS
 ----------------------------------------------------------------
-local function hookChat()
-    pcall(function()
-        connect(TextChatService.MessageReceived, function(msg)
-            processText(msg.Text or "")
-        end)
+local hookedObjs={}
+local function hookTextObj(obj,source)
+    if hookedObjs[obj] then return end
+    hookedObjs[obj]=true
+    if obj:IsA("TextLabel") or obj:IsA("TextButton") or obj:IsA("TextBox") then
+        if obj.Text and obj.Text~="" then processRawText(obj.Text,source) end
+        connect(obj:GetPropertyChangedSignal("Text"),function() processRawText(obj.Text,source) end)
+    end
+end
+
+local function hookGui(gui,source)
+    for _,desc in ipairs(gui:GetDescendants()) do hookTextObj(desc,source) end
+    connect(gui.DescendantAdded,function(desc) task.wait(0.05) hookTextObj(desc,source) end)
+end
+
+-- HOOK 1: Workspace billboard (prioritas utama)
+local function scanWorkspaceGuis()
+    local function checkObj(obj)
+        if obj:IsA("BillboardGui") or obj:IsA("SurfaceGui") or obj:IsA("ScreenGui") then
+            hookGui(obj,"Billboard:"..obj.Name)
+        elseif obj:IsA("TextLabel") or obj:IsA("TextButton") then
+            hookTextObj(obj,"Workspace")
+        end
+    end
+    for _,obj in ipairs(game.Workspace:GetDescendants()) do checkObj(obj) end
+    connect(game.Workspace.DescendantAdded,function(obj)
+        task.wait(0.1) checkObj(obj)
+        for _,d in ipairs(obj:GetDescendants()) do checkObj(d) end
     end)
+end
+
+-- HOOK 2: CoreGui
+local function hookCoreGui()
     pcall(function()
-        local chatGui = LocalPlayer.PlayerGui:FindFirstChild("Chat", true)
-        if chatGui then
-            local function hookLabel(obj)
-                if obj:IsA("TextLabel") then
-                    processText(obj.Text)
-                    connect(obj:GetPropertyChangedSignal("Text"), function() processText(obj.Text) end)
+        local cg=game:GetService("CoreGui")
+        hookGui(cg,"CoreGui")
+        connect(cg.DescendantAdded,function(obj) task.wait(0.05) hookTextObj(obj,"CoreGui") end)
+    end)
+end
+
+-- HOOK 3: PlayerGui real-time scan tiap 0.3 detik
+local function startPlayerGuiScan()
+    task.spawn(function()
+        while not Unloaded do
+            task.wait(0.3)
+            for _,obj in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
+                if (obj:IsA("TextLabel") or obj:IsA("TextButton")) and obj.Text~="" and #obj.Text<=80 then
+                    processRawText(obj.Text,"PlayerGui")
                 end
             end
-            for _,d in ipairs(chatGui:GetDescendants()) do hookLabel(d) end
-            connect(chatGui.DescendantAdded, function(d) task.wait(0.05) hookLabel(d) end)
         end
     end)
 end
 
-local function hookObj(obj)
-    if obj:IsA("TextLabel") or obj:IsA("TextButton") then
-        processText(obj.Text)
-        connect(obj:GetPropertyChangedSignal("Text"), function() processText(obj.Text) end)
-    end
-end
-
-local function scanWorkspace()
-    for _,obj in ipairs(game.Workspace:GetDescendants()) do hookObj(obj) end
-    connect(game.Workspace.DescendantAdded, function(obj) task.wait(0.1) hookObj(obj) end)
-end
-
-local function hookCharBubbles(char)
-    connect(char.DescendantAdded, function(obj)
+-- HOOK 4: Chat bubble + TextChatService
+local function hookChatBubble(char,name)
+    connect(char.DescendantAdded,function(obj)
         task.wait(0.05)
-        if obj:IsA("BillboardGui") then
-            for _,label in ipairs(obj:GetDescendants()) do
-                if label:IsA("TextLabel") then processText(label.Text) end
-            end
-        end
+        if obj:IsA("BillboardGui") or obj:IsA("SurfaceGui") then hookGui(obj,"Bubble:"..name) end
     end)
 end
-
-local function hookAllBubbles()
-    for _,p in ipairs(Players:GetPlayers()) do
-        if p.Character then hookCharBubbles(p.Character) end
-        connect(p.CharacterAdded, function(char) hookCharBubbles(char) end)
-    end
-    connect(Players.PlayerAdded, function(p)
-        if p.Character then hookCharBubbles(p.Character) end
-        connect(p.CharacterAdded, function(char) hookCharBubbles(char) end)
-    end)
+local function hookPlayer(player)
+    local nm=player.Name
+    if player.Character then hookChatBubble(player.Character,nm) end
+    connect(player.CharacterAdded,function(char) hookChatBubble(char,nm) end)
 end
+pcall(function()
+    connect(TextChatService.MessageReceived,function(msg) processRawText(msg.Text or "","TextChat") end)
+end)
+for _,p in ipairs(Players:GetPlayers()) do hookPlayer(p) end
+connect(Players.PlayerAdded,hookPlayer)
 
 ----------------------------------------------------------------
--- CORE: ADMIN ABUSE
+-- ADMIN ABUSE
 ----------------------------------------------------------------
-local ADMIN_REMOTES = {
-    "AdminCommand","AdminEvent","GiveItem","GivePet",
-    "GiveCurrency","SetStat","UpdateStat","GiveAdmin",
-    "GiveCash","GiveCoins","GiveGems","GiveAll","UnlockAll",
-}
-
+local ADMIN_REMOTES={"AdminCommand","AdminEvent","GiveItem","GivePet","GiveCurrency","SetStat","UpdateStat","GiveAdmin","GiveCash","GiveCoins","GiveGems","GiveAll","UnlockAll"}
 local function runAdminAbuse()
     if not State.adminAbuse then return end
-    local fired = 0
-    local payloads = {
-        {LocalPlayer.Name,"GiveCash",999999},
-        {LocalPlayer.Name,"GiveCoins",999999},
-        {LocalPlayer.Name,"GiveGems",999999},
-        {LocalPlayer.Name,"SetAdmin",true},
-        {LocalPlayer.Name,"GiveAll",true},
-    }
+    local fired=0
+    local payloads={{LocalPlayer.Name,"GiveCash",999999},{LocalPlayer.Name,"GiveCoins",999999},{LocalPlayer.Name,"GiveGems",999999},{LocalPlayer.Name,"SetAdmin",true},{LocalPlayer.Name,"GiveAll",true}}
     for _,name in ipairs(ADMIN_REMOTES) do
-        local remote = ReplicatedStorage:FindFirstChild(name,true)
-            or game.Workspace:FindFirstChild(name,true)
+        local remote=ReplicatedStorage:FindFirstChild(name,true) or game.Workspace:FindFirstChild(name,true)
         if remote then
             if remote:IsA("RemoteEvent") then
-                for _,p in ipairs(payloads) do
-                    pcall(function() remote:FireServer(table.unpack(p)) end)
-                end
-                fired = fired+1
+                for _,p in ipairs(payloads) do pcall(function() remote:FireServer(table.unpack(p)) end) end
+                fired=fired+1
             elseif remote:IsA("RemoteFunction") then
                 pcall(function() remote:InvokeServer(LocalPlayer.Name,"admin",true) end)
-                fired = fired+1
+                fired=fired+1
             end
         end
     end
-    pushLog(fired>0 and "Admin Abuse: fired "..fired.." remotes" or "Admin Abuse: no remotes found", fired>0 and Theme.Gold or Theme.Sub)
+    pushLog(fired>0 and "Admin Abuse: "..fired.." fired" or "Admin Abuse: no remotes",fired>0 and Theme.Gold or Theme.Sub)
 end
-
-task.spawn(function()
-    task.wait(2)
-    runAdminAbuse()
-    while not Unloaded do
-        task.wait(30)
-        runAdminAbuse()
-    end
-end)
-
--- Periodic scan PlayerGui
-task.spawn(function()
-    while not Unloaded do
-        task.wait(3)
-        for _,obj in ipairs(LocalPlayer.PlayerGui:GetDescendants()) do
-            if obj:IsA("TextLabel") and obj.Text~="" then processText(obj.Text) end
-        end
-    end
-end)
+task.spawn(function() task.wait(2) runAdminAbuse() while not Unloaded do task.wait(30) runAdminAbuse() end end)
 
 ----------------------------------------------------------------
 -- UNLOAD
 ----------------------------------------------------------------
-unload = function()
+unload=function()
     if Unloaded then return end
-    Unloaded = true
+    Unloaded=true
     for _,c in ipairs(Connections) do pcall(function() c:Disconnect() end) end
-    Connections = {}
-    if getgenv then
-        pcall(function() getgenv().EclipseHubUnload=nil getgenv().StopAura=nil end)
-    end
+    Connections={}
+    if getgenv then pcall(function() getgenv().EclipseHubUnload=nil getgenv().StopAura=nil end) end
     tween(Scale,{Scale=0.9},0.2)
     tween(Window,{GroupTransparency=1},0.2)
     tween(Shadow,{ImageTransparency=1},0.2)
@@ -688,21 +806,17 @@ if getgenv then getgenv().EclipseHubUnload=unload getgenv().StopAura=unload end
 ----------------------------------------------------------------
 -- BOOT
 ----------------------------------------------------------------
-hookChat()
-scanWorkspace()
-hookAllBubbles()
+scanWorkspaceGuis()
+hookCoreGui()
+startPlayerGuiScan()
 
--- Log remote status on boot
 task.spawn(function()
     task.wait(1)
-    local remote = getRedeemRemote()
-    if remote then
-        pushLog("Remote found: "..remote:GetFullName(), Theme.Good)
-    else
-        pushLog("Remote not found — UI fallback aktif", Theme.Bad)
-    end
+    local remote=getRedeemRemote()
+    pushLog(remote and "Remote: "..remote:GetFullName() or "Remote not found — UI fallback aktif",remote and Theme.Good or Theme.Bad)
 end)
 
-pushLog("EclipseHub v2.2 loaded", Theme.AccentSoft)
-pushLog("StockEventService/Redeem hardcoded", Theme.Good)
-pushLog("Waiting for codes...", Theme.Sub)
+pushLog("EclipseHub v2.5 loaded",Theme.AccentSoft)
+pushLog("Auto Part Detector ACTIVE",Theme.Good)
+pushLog("3 Layer Submit READY",Theme.Good)
+pushLog("Waiting for admin...",Theme.Sub)
